@@ -322,7 +322,7 @@ export function createNERModel(config: Partial<NERModelConfig> & { modelPath: st
     vocabPath: config.vocabPath,
     labelMap: config.labelMap ?? DEFAULT_LABEL_MAP,
     maxLength: config.maxLength ?? 512,
-    doLowerCase: config.doLowerCase ?? true,
+    doLowerCase: config.doLowerCase ?? false, // XLM-RoBERTa is cased
     modelVersion: config.modelVersion ?? '1.0.0',
   };
 

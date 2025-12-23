@@ -1,7 +1,7 @@
 /**
- * WordPiece Tokenizer
- * Tokenizes text into subword tokens while maintaining character offset mapping
- * Compatible with BERT-style models
+ * HuggingFace Tokenizer
+ * Loads and uses tokenizers from HuggingFace's tokenizer.json format
+ * Supports Unigram (SentencePiece) and BPE tokenizers
  */
 
 /**
@@ -16,9 +16,9 @@ export interface Token {
   start: number;
   /** End character offset in original text */
   end: number;
-  /** Whether this is a continuation token (starts with ##) */
+  /** Whether this is a continuation token */
   isContinuation: boolean;
-  /** Whether this is a special token ([CLS], [SEP], etc.) */
+  /** Whether this is a special token */
   isSpecial: boolean;
 }
 
@@ -39,58 +39,63 @@ export interface TokenizationResult {
 }
 
 /**
- * Tokenizer configuration
+ * HuggingFace tokenizer.json structure
  */
-export interface TokenizerConfig {
-  /** Path to vocabulary file */
-  vocabPath?: string;
-  /** Vocabulary as a Map */
-  vocab?: Map<string, number>;
-  /** Maximum sequence length */
-  maxLength: number;
-  /** Unknown token */
-  unkToken: string;
-  /** Classification token */
-  clsToken: string;
-  /** Separator token */
-  sepToken: string;
-  /** Padding token */
-  padToken: string;
-  /** Mask token */
-  maskToken: string;
-  /** Whether to lowercase input */
-  doLowerCase: boolean;
-  /** Strip accents */
-  stripAccents: boolean;
+interface HFTokenizerConfig {
+  version: string;
+  model: {
+    type: string;
+    vocab: Array<[string, number]> | Record<string, number>;
+    merges?: string[];
+  };
+  added_tokens: Array<{
+    id: number;
+    content: string;
+    special: boolean;
+  }>;
+  pre_tokenizer?: {
+    type: string;
+  };
 }
 
 /**
- * Default tokenizer configuration for BERT-style models
+ * Tokenizer configuration
+ */
+export interface TokenizerConfig {
+  /** Maximum sequence length */
+  maxLength: number;
+  /** Whether to lowercase input */
+  doLowerCase: boolean;
+}
+
+/**
+ * Default tokenizer configuration
  */
 export const DEFAULT_TOKENIZER_CONFIG: TokenizerConfig = {
   maxLength: 512,
-  unkToken: '[UNK]',
-  clsToken: '[CLS]',
-  sepToken: '[SEP]',
-  padToken: '[PAD]',
-  maskToken: '[MASK]',
-  doLowerCase: true,
-  stripAccents: true,
+  doLowerCase: false, // XLM-RoBERTa doesn't lowercase
 };
 
 /**
- * WordPiece Tokenizer implementation
+ * WordPiece Tokenizer - supports both HuggingFace JSON and vocab.txt formats
  */
 export class WordPieceTokenizer {
   private vocab: Map<string, number>;
   private inverseVocab: Map<number, string>;
   private config: TokenizerConfig;
+  private sortedVocab: Array<[string, number]>;
 
-  // Special token IDs
-  private unkId: number;
-  private clsId: number;
-  private sepId: number;
-  private padId: number;
+  // Special token IDs (XLM-RoBERTa style)
+  private clsId: number = 0;  // <s>
+  private sepId: number = 2;  // </s>
+  private padId: number = 1;  // <pad>
+  private unkId: number = 3;  // <unk>
+  
+  // Special token strings
+  private clsToken: string = '<s>';
+  private sepToken: string = '</s>';
+  private padToken: string = '<pad>';
+  private unkToken: string = '<unk>';
 
   constructor(vocab: Map<string, number>, config: Partial<TokenizerConfig> = {}) {
     this.vocab = vocab;
@@ -102,11 +107,39 @@ export class WordPieceTokenizer {
       this.inverseVocab.set(id, token);
     }
 
-    // Get special token IDs
-    this.unkId = this.vocab.get(this.config.unkToken) ?? 0;
-    this.clsId = this.vocab.get(this.config.clsToken) ?? 101;
-    this.sepId = this.vocab.get(this.config.sepToken) ?? 102;
-    this.padId = this.vocab.get(this.config.padToken) ?? 0;
+    // Sort vocab by token length (longest first) for greedy matching
+    this.sortedVocab = Array.from(vocab.entries()).sort((a, b) => b[0].length - a[0].length);
+
+    // Try to detect special tokens from vocab
+    this.detectSpecialTokens();
+  }
+
+  /**
+   * Detect special tokens from vocabulary
+   */
+  private detectSpecialTokens(): void {
+    // XLM-RoBERTa style
+    if (this.vocab.has('<s>')) {
+      this.clsToken = '<s>';
+      this.clsId = this.vocab.get('<s>') ?? 0;
+      this.sepToken = '</s>';
+      this.sepId = this.vocab.get('</s>') ?? 2;
+      this.padToken = '<pad>';
+      this.padId = this.vocab.get('<pad>') ?? 1;
+      this.unkToken = '<unk>';
+      this.unkId = this.vocab.get('<unk>') ?? 3;
+    }
+    // BERT style
+    else if (this.vocab.has('[CLS]')) {
+      this.clsToken = '[CLS]';
+      this.clsId = this.vocab.get('[CLS]') ?? 101;
+      this.sepToken = '[SEP]';
+      this.sepId = this.vocab.get('[SEP]') ?? 102;
+      this.padToken = '[PAD]';
+      this.padId = this.vocab.get('[PAD]') ?? 0;
+      this.unkToken = '[UNK]';
+      this.unkId = this.vocab.get('[UNK]') ?? 100;
+    }
   }
 
   /**
@@ -116,10 +149,10 @@ export class WordPieceTokenizer {
     const tokens: Token[] = [];
     const tokenToCharSpan: Array<[number, number] | null> = [];
 
-    // Add [CLS] token
+    // Add CLS token
     tokens.push({
       id: this.clsId,
-      token: this.config.clsToken,
+      token: this.clsToken,
       start: 0,
       end: 0,
       isContinuation: false,
@@ -128,24 +161,39 @@ export class WordPieceTokenizer {
     tokenToCharSpan.push(null);
 
     // Preprocess text
-    const processedText = this.preprocess(text);
+    const processedText = this.config.doLowerCase ? text.toLowerCase() : text;
 
-    // Split into words by whitespace
-    const wordSpans = this.splitIntoWords(processedText, text);
-
-    // Tokenize each word
-    for (const { word, start, end } of wordSpans) {
-      const wordTokens = this.tokenizeWord(word, start, end);
-      tokens.push(...wordTokens);
-      for (const t of wordTokens) {
-        tokenToCharSpan.push([t.start, t.end]);
+    // Tokenize using greedy longest-match
+    let pos = 0;
+    while (pos < processedText.length) {
+      // Skip whitespace
+      if (/\s/.test(processedText[pos]!)) {
+        pos++;
+        continue;
       }
+
+      // Find the longest matching token starting at this position
+      const { token, id, length } = this.findBestToken(processedText, pos);
+      
+      const isFirstOfWord = pos === 0 || /\s/.test(processedText[pos - 1]!);
+      
+      tokens.push({
+        id,
+        token,
+        start: pos,
+        end: pos + length,
+        isContinuation: !isFirstOfWord && !token.startsWith('▁'),
+        isSpecial: false,
+      });
+      tokenToCharSpan.push([pos, pos + length]);
+      
+      pos += length;
     }
 
-    // Add [SEP] token
+    // Add SEP token
     tokens.push({
       id: this.sepId,
-      token: this.config.sepToken,
+      token: this.sepToken,
       start: text.length,
       end: text.length,
       isContinuation: false,
@@ -158,10 +206,9 @@ export class WordPieceTokenizer {
     if (tokens.length > maxTokens) {
       tokens.length = maxTokens - 1;
       tokenToCharSpan.length = maxTokens - 1;
-      // Add [SEP] at end
       tokens.push({
         id: this.sepId,
-        token: this.config.sepToken,
+        token: this.sepToken,
         start: text.length,
         end: text.length,
         isContinuation: false,
@@ -185,201 +232,70 @@ export class WordPieceTokenizer {
   }
 
   /**
-   * Preprocesses text (lowercase, accent stripping)
+   * Find the best matching token using greedy longest-match
    */
-  private preprocess(text: string): string {
-    let processed = text;
-
-    if (this.config.doLowerCase) {
-      processed = processed.toLowerCase();
-    }
-
-    if (this.config.stripAccents) {
-      processed = this.stripAccents(processed);
-    }
-
-    return processed;
-  }
-
-  /**
-   * Strips accents from text
-   */
-  private stripAccents(text: string): string {
-    return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  }
-
-  /**
-   * Splits text into words while tracking character offsets
-   */
-  private splitIntoWords(
-    processedText: string,
-    originalText: string
-  ): Array<{ word: string; start: number; end: number }> {
-    const words: Array<{ word: string; start: number; end: number }> = [];
-
-    // Split on whitespace and punctuation while keeping track of positions
-    const wordPattern = /\S+/g;
-    let match: RegExpExecArray | null;
-
-    while ((match = wordPattern.exec(processedText)) !== null) {
-      // Find corresponding position in original text
-      // Since we may have lowercased, we need to map positions
-      const start = match.index;
-      const end = start + match[0].length;
-
-      words.push({
-        word: match[0],
-        start,
-        end,
-      });
-    }
-
-    return words;
-  }
-
-  /**
-   * Tokenizes a single word using WordPiece algorithm
-   */
-  private tokenizeWord(word: string, startOffset: number, endOffset: number): Token[] {
-    const tokens: Token[] = [];
-
-    // Handle punctuation separately
-    const subwords = this.splitWordIntoPieces(word);
-
-    let currentOffset = startOffset;
-
-    for (let i = 0; i < subwords.length; i++) {
-      let subword = subwords[i]!;
-      const isContinuation = i > 0;
-
-      // For continuation tokens, add ## prefix for vocab lookup
-      const vocabKey = isContinuation ? '##' + subword : subword;
-
-      // Look up in vocabulary
-      let tokenId = this.vocab.get(vocabKey);
-
-      // If not found, try to find longest matching prefix
-      if (tokenId === undefined) {
-        const { id, token } = this.findLongestMatch(subword, isContinuation);
-        tokenId = id;
-        subword = token;
-      }
-
-      const tokenLength = subword.length;
-      const tokenEnd = Math.min(currentOffset + tokenLength, endOffset);
-
-      tokens.push({
-        id: tokenId,
-        token: isContinuation ? '##' + subword : subword,
-        start: currentOffset,
-        end: tokenEnd,
-        isContinuation,
-        isSpecial: false,
-      });
-
-      currentOffset = tokenEnd;
-    }
-
-    return tokens;
-  }
-
-  /**
-   * Splits a word into pieces, handling punctuation
-   */
-  private splitWordIntoPieces(word: string): string[] {
-    const pieces: string[] = [];
-    let current = '';
-
-    for (const char of word) {
-      if (this.isPunctuation(char)) {
-        if (current.length > 0) {
-          pieces.push(current);
-          current = '';
+  private findBestToken(text: string, startPos: number): { token: string; id: number; length: number } {
+    const remaining = text.slice(startPos);
+    
+    // Check if this starts a new word (preceded by space or start)
+    const isWordStart = startPos === 0 || /\s/.test(text[startPos - 1]!);
+    
+    // For SentencePiece models, word-initial tokens start with ▁
+    if (isWordStart) {
+      // Try with ▁ prefix first
+      const withPrefix = '▁' + remaining;
+      for (const [vocabToken, id] of this.sortedVocab) {
+        if (withPrefix.startsWith(vocabToken)) {
+          // Return the match length without the ▁ since that's not in original text
+          return { 
+            token: vocabToken, 
+            id, 
+            length: vocabToken.length - 1 // Subtract 1 for the ▁
+          };
         }
-        pieces.push(char);
-      } else {
-        current += char;
       }
     }
-
-    if (current.length > 0) {
-      pieces.push(current);
-    }
-
-    return pieces;
-  }
-
-  /**
-   * Checks if a character is punctuation
-   */
-  private isPunctuation(char: string): boolean {
-    const code = char.charCodeAt(0);
-    // ASCII punctuation and some Unicode punctuation
-    return (
-      (code >= 33 && code <= 47) ||
-      (code >= 58 && code <= 64) ||
-      (code >= 91 && code <= 96) ||
-      (code >= 123 && code <= 126) ||
-      /[\u2000-\u206F]/.test(char) || // General punctuation
-      /[\u3000-\u303F]/.test(char) // CJK punctuation
-    );
-  }
-
-  /**
-   * Finds the longest matching token in vocabulary
-   */
-  private findLongestMatch(
-    word: string,
-    isContinuation: boolean
-  ): { id: number; token: string } {
-    const prefix = isContinuation ? '##' : '';
-
-    // Try progressively shorter substrings
-    for (let end = word.length; end > 0; end--) {
-      const subword = word.slice(0, end);
-      const vocabKey = prefix + subword;
-
-      const id = this.vocab.get(vocabKey);
-      if (id !== undefined) {
-        return { id, token: subword };
+    
+    // Try exact match without prefix
+    for (const [vocabToken, id] of this.sortedVocab) {
+      // Skip special tokens and tokens starting with ▁ for non-word-start positions
+      if (vocabToken.startsWith('<') || vocabToken.startsWith('[')) continue;
+      if (!isWordStart && vocabToken.startsWith('▁')) continue;
+      
+      if (remaining.startsWith(vocabToken.replace(/^▁/, ''))) {
+        const matchLength = vocabToken.replace(/^▁/, '').length;
+        if (matchLength > 0) {
+          return { token: vocabToken, id, length: matchLength };
+        }
       }
     }
-
-    // Fall back to unknown token
-    return { id: this.unkId, token: word };
+    
+    // Single character fallback
+    const char = remaining[0]!;
+    const charId = this.vocab.get(char) ?? this.vocab.get('▁' + char) ?? this.unkId;
+    return { token: char, id: charId, length: 1 };
   }
 
   /**
    * Decodes token IDs back to text
    */
   decode(tokenIds: number[]): string {
-    const tokens: string[] = [];
+    const parts: string[] = [];
 
     for (const id of tokenIds) {
       const token = this.inverseVocab.get(id);
       if (token === undefined) continue;
-
-      // Skip special tokens
-      if (
-        token === this.config.clsToken ||
-        token === this.config.sepToken ||
-        token === this.config.padToken
-      ) {
-        continue;
-      }
-
-      // Handle continuation tokens
-      if (token.startsWith('##')) {
-        tokens.push(token.slice(2));
+      if (token === this.clsToken || token === this.sepToken || token === this.padToken) continue;
+      
+      // SentencePiece uses ▁ to mark word boundaries
+      if (token.startsWith('▁')) {
+        parts.push(' ' + token.slice(1));
       } else {
-        if (tokens.length > 0) {
-          tokens.push(' ');
-        }
-        tokens.push(token);
+        parts.push(token);
       }
     }
 
-    return tokens.join('');
+    return parts.join('').trim();
   }
 
   /**
@@ -405,16 +321,62 @@ export class WordPieceTokenizer {
 }
 
 /**
- * Loads vocabulary from a text file (one token per line)
+ * Loads vocabulary from a file (supports tokenizer.json and vocab.txt)
  */
-export async function loadVocabFromFile(path: string): Promise<Map<string, number>> {
+export async function loadVocabFromFile(filePath: string): Promise<Map<string, number>> {
   const fs = await import('fs/promises');
-  const content = await fs.readFile(path, 'utf-8');
-  return parseVocab(content);
+  const content = await fs.readFile(filePath, 'utf-8');
+  
+  // Detect format
+  if (filePath.endsWith('.json') || content.trim().startsWith('{')) {
+    return parseHFTokenizerJson(content);
+  } else {
+    return parseVocab(content);
+  }
 }
 
 /**
- * Parses vocabulary from string content
+ * Parses HuggingFace tokenizer.json format
+ */
+export function parseHFTokenizerJson(content: string): Map<string, number> {
+  const vocab = new Map<string, number>();
+  
+  try {
+    const config = JSON.parse(content) as HFTokenizerConfig;
+    
+    // Add special tokens first
+    if (config.added_tokens) {
+      for (const token of config.added_tokens) {
+        vocab.set(token.content, token.id);
+      }
+    }
+    
+    // Add model vocabulary
+    if (config.model?.vocab) {
+      if (Array.isArray(config.model.vocab)) {
+        // Unigram format: array of [token, score] pairs
+        for (let i = 0; i < config.model.vocab.length; i++) {
+          const entry = config.model.vocab[i];
+          if (entry && typeof entry[0] === 'string') {
+            vocab.set(entry[0], i);
+          }
+        }
+      } else {
+        // BPE/WordPiece format: object mapping token -> id
+        for (const [token, id] of Object.entries(config.model.vocab)) {
+          vocab.set(token, id as number);
+        }
+      }
+    }
+  } catch (e) {
+    throw new Error(`Failed to parse tokenizer.json: ${e}`);
+  }
+  
+  return vocab;
+}
+
+/**
+ * Parses vocabulary from string content (vocab.txt format)
  */
 export function parseVocab(content: string): Map<string, number> {
   const vocab = new Map<string, number>();
@@ -435,26 +397,19 @@ export function parseVocab(content: string): Map<string, number> {
  */
 export function createTestVocab(): Map<string, number> {
   const tokens = [
-    '[PAD]',
-    '[UNK]',
-    '[CLS]',
-    '[SEP]',
-    '[MASK]',
-    'the',
-    'a',
-    'is',
-    'was',
-    'john',
-    'smith',
-    'berlin',
-    'germany',
-    '##s',
-    '##ed',
-    '##ing',
-    ',',
-    '.',
+    '<s>',
+    '<pad>',
+    '</s>',
+    '<unk>',
+    '▁Hello',
+    '▁John',
+    '▁Smith',
+    '▁from',
+    '▁Acme',
+    '▁Corp',
+    '▁in',
+    '▁Berlin',
     '!',
-    '?',
   ];
 
   const vocab = new Map<string, number>();
@@ -464,4 +419,3 @@ export function createTestVocab(): Map<string, number> {
 
   return vocab;
 }
-
