@@ -115,6 +115,7 @@ import {
   DetectedEntity,
   SemanticConfig,
   SpanMatch,
+  PIIType,
   createDefaultPolicy,
   mergePolicy,
 } from "./types/index.js";
@@ -191,6 +192,13 @@ export interface NERConfig {
    * Callback for status messages
    */
   onStatus?: (status: string) => void;
+
+  /**
+   * Confidence thresholds per PII type (0.0 - 1.0)
+   * Overrides default thresholds for specified types
+   * @example { PERSON: 0.8, ORG: 0.7 }
+   */
+  thresholds?: Partial<Record<PIIType, number>>;
 }
 
 /**
@@ -205,11 +213,6 @@ export interface AnonymizerConfig {
    * @default { mode: 'disabled' }
    */
   ner?: NERConfig;
-
-  /**
-   * @deprecated Use `ner` instead. Direct NER model injection for advanced use cases.
-   */
-  nerModel?: INERModel;
 
   /**
    * Semantic enrichment configuration
@@ -254,14 +257,23 @@ export class Anonymizer {
     this.policyVersion = config.policyVersion ?? "1.0.0";
 
     // Handle NER configuration
-    if (config.nerModel) {
-      // Legacy: direct model injection
-      this.nerModel = config.nerModel;
-      this.nerConfig = { mode: "custom" };
-      this.modelVersion = config.modelVersion ?? config.nerModel.version;
-    } else {
-      this.nerConfig = config.ner ?? { mode: "disabled" };
-      this.modelVersion = config.modelVersion ?? "1.0.0";
+    this.nerConfig = config.ner ?? { mode: "disabled" };
+    this.modelVersion = config.modelVersion ?? "1.0.0";
+
+    // Merge NER thresholds into default policy if provided
+    if (this.nerConfig.thresholds !== undefined) {
+      const thresholdsMap = new Map(this.defaultPolicy.confidenceThresholds);
+      for (const [type, threshold] of Object.entries(
+        this.nerConfig.thresholds
+      )) {
+        if (threshold !== undefined) {
+          thresholdsMap.set(type as PIIType, threshold);
+        }
+      }
+      this.defaultPolicy = {
+        ...this.defaultPolicy,
+        confidenceThresholds: thresholdsMap,
+      };
     }
 
     // Handle semantic configuration
@@ -547,28 +559,6 @@ export class Anonymizer {
  */
 export function createAnonymizer(config?: AnonymizerConfig): Anonymizer {
   return new Anonymizer(config);
-}
-
-/**
- * Creates an anonymizer with a custom NER model
- * @deprecated Use createAnonymizer with ner: { mode: 'custom', modelPath, vocabPath } instead
- */
-export async function createAnonymizerWithNER(
-  modelPath: string,
-  vocabPath: string,
-  config?: Omit<AnonymizerConfig, "nerModel" | "ner">
-): Promise<Anonymizer> {
-  const anonymizer = new Anonymizer({
-    ...config,
-    ner: {
-      mode: "custom",
-      modelPath,
-      vocabPath,
-    },
-  });
-
-  await anonymizer.initialize();
-  return anonymizer;
 }
 
 /**

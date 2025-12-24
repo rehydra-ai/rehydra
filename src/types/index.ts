@@ -262,14 +262,23 @@ export function mergePolicy(
 ): AnonymizationPolicy {
   const defaultPolicy = createDefaultPolicy();
 
+  // Deep merge confidenceThresholds Map
+  let confidenceThresholds = defaultPolicy.confidenceThresholds;
+  if (partial.confidenceThresholds !== undefined) {
+    confidenceThresholds = new Map(defaultPolicy.confidenceThresholds);
+    // Merge in partial thresholds
+    for (const [type, threshold] of partial.confidenceThresholds) {
+      confidenceThresholds.set(type, threshold);
+    }
+  }
+
   return {
     enabledTypes: partial.enabledTypes ?? defaultPolicy.enabledTypes,
     regexEnabledTypes:
       partial.regexEnabledTypes ?? defaultPolicy.regexEnabledTypes,
     nerEnabledTypes: partial.nerEnabledTypes ?? defaultPolicy.nerEnabledTypes,
     typePriority: partial.typePriority ?? defaultPolicy.typePriority,
-    confidenceThresholds:
-      partial.confidenceThresholds ?? defaultPolicy.confidenceThresholds,
+    confidenceThresholds,
     customIdPatterns:
       partial.customIdPatterns ?? defaultPolicy.customIdPatterns,
     allowlistTerms: partial.allowlistTerms ?? defaultPolicy.allowlistTerms,
