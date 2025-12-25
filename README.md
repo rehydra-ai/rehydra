@@ -4,23 +4,44 @@
 ![Issues](https://img.shields.io/github/issues/elanlanguages/bridge-anonymization)
 [![codecov](https://codecov.io/github/elanlanguages/bridge-anonymization/graph/badge.svg?token=WX5RI0ZZJG)](https://codecov.io/github/elanlanguages/bridge-anonymization)
 
-On-device PII anonymization module for high-privacy translation workflows. Detects and replaces Personally Identifiable Information (PII) with placeholder tags while maintaining an encrypted mapping for later rehydration.
+On-device PII anonymization module for high-privacy AI workflows. Detects and replaces Personally Identifiable Information (PII) with placeholder tags while maintaining an encrypted mapping for later rehydration.
+
+**Works in Node.js, Bun, and browsers** - zero server-side dependencies required.
 
 ## Features
 
 - **Structured PII Detection**: Regex-based detection for emails, phones, IBANs, credit cards, IPs, URLs
-- **Soft PII Detection**: ONNX-powered NER model for names, organizations, locations (auto-downloads on first use)
+- **Soft PII Detection**: ONNX-powered NER model for names, organizations, locations (auto-downloads on first use if enabled)
+- **Semantic Enrichment**: AI/MT-friendly tags with gender/location attributes for better translations
 - **Secure PII Mapping**: AES-256-GCM encrypted storage of original PII values
+- **Cross-Platform**: Works identically in Node.js, Bun, and browsers
 - **Configurable Policies**: Customizable detection rules, thresholds, and allowlists
 - **Validation & Leak Scanning**: Built-in validation and optional leak detection
 
 ## Installation
 
+### Node.js / Bun
+
 ```bash
 npm install @elanlanguages/bridge-anonymization
 ```
 
-> **Bun users**: Install `onnxruntime-web` additionally: `bun add @elanlanguages/bridge-anonymization onnxruntime-web`
+### Browser (with bundler)
+
+```bash
+npm install @elanlanguages/bridge-anonymization onnxruntime-web
+```
+
+### Browser (without bundler)
+
+```html
+<script type="module">
+  // Import directly from your dist folder or CDN
+  import { createAnonymizer } from './node_modules/@elanlanguages/bridge-anonymization/dist/index.js';
+  
+  // onnxruntime-web is automatically loaded from CDN when needed
+</script>
+```
 
 ## Quick Start
 
@@ -49,7 +70,7 @@ import { createAnonymizer } from '@elanlanguages/bridge-anonymization';
 const anonymizer = createAnonymizer({
   ner: { 
     mode: 'quantized',  // or 'standard' for full model (~1.1 GB)
-    onStatus: (status) => console.log(status),  // Optional progress
+    onStatus: (status) => console.log(status),
   }
 });
 
@@ -61,20 +82,37 @@ const result = await anonymizer.anonymize(
 
 console.log(result.anonymizedText);
 // "Hello <PII type="PERSON" id="1"/> from <PII type="ORG" id="2"/> in <PII type="LOCATION" id="3"/>!"
+
+// Clean up when done
+await anonymizer.dispose();
 ```
 
-### One-liner with NER
+### With Semantic Enrichment
+
+Add gender and location scope for better machine translation:
 
 ```typescript
-import { anonymizeWithNER } from '@elanlanguages/bridge-anonymization';
+import { createAnonymizer } from '@elanlanguages/bridge-anonymization';
 
-const result = await anonymizeWithNER(
-  'Contact John Smith at john@example.com',
-  { mode: 'quantized', onStatus: console.log }
+const anonymizer = createAnonymizer({
+  ner: { mode: 'quantized' },
+  semantic: { 
+    enabled: true,  // Downloads ~12 MB of semantic data on first use
+    onStatus: (status) => console.log(status),
+  }
+});
+
+await anonymizer.initialize();
+
+const result = await anonymizer.anonymize(
+  'Hello Maria Schmidt from Berlin!'
 );
+
+console.log(result.anonymizedText);
+// "Hello <PII type="PERSON" gender="female" id="1"/> from <PII type="LOCATION" scope="city" id="2"/>!"
 ```
 
-## Translation Workflow (Anonymize → Translate → Rehydrate)
+## Example: Translation Workflow (Anonymize → Translate → Rehydrate)
 
 The full workflow for privacy-preserving translation:
 
@@ -86,13 +124,13 @@ import {
   InMemoryKeyProvider 
 } from '@elanlanguages/bridge-anonymization';
 
-// 1. Create a key provider (so you can decrypt later)
+// 1. Create a key provider (required to decrypt later)
 const keyProvider = new InMemoryKeyProvider();
 
 // 2. Create anonymizer with key provider
 const anonymizer = createAnonymizer({
   ner: { mode: 'quantized' },
-  keyProvider: keyProvider  // Important: keep reference to decrypt later!
+  keyProvider: keyProvider
 });
 
 await anonymizer.initialize();
@@ -104,19 +142,22 @@ const result = await anonymizer.anonymize(original);
 console.log(result.anonymizedText);
 // "Hello <PII type="PERSON" id="1"/> from <PII type="ORG" id="2"/> in <PII type="LOCATION" id="3"/>!"
 
-// 4. Translate (the placeholders are preserved by translation services)
-const translated = await bridgeTranslate(result.anonymizedText, { from: 'en', to: 'de' });
+// 4. Translate (or do other AI workloads that preserve placeholders)
+const translated = await yourTranslationService(result.anonymizedText, { from: 'en', to: 'de' });
 // "Hallo <PII type="PERSON" id="1"/> von <PII type="ORG" id="2"/> in <PII type="LOCATION" id="3"/>!"
 
 // 5. Decrypt the PII map using the same key
 const encryptionKey = await keyProvider.getKey();
-const piiMap = decryptPIIMap(result.piiMap, encryptionKey);
+const piiMap = await decryptPIIMap(result.piiMap, encryptionKey);
 
 // 6. Rehydrate - replace placeholders with original values
 const rehydrated = rehydrate(translated, piiMap);
 
 console.log(rehydrated);
 // "Hallo John Smith von Acme Corp in Berlin!"
+
+// 7. Clean up
+await anonymizer.dispose();
 ```
 
 ### Key Points
@@ -124,23 +165,6 @@ console.log(rehydrated);
 - **Save the encryption key** - You need the same key to decrypt the PII map
 - **Placeholders are XML-like** - Most translation services preserve them automatically
 - **PII stays local** - Original values never leave your system during translation
-
-### Production Key Management
-
-For production, use a proper key provider:
-
-```typescript
-import { EnvKeyProvider } from '@elanlanguages/bridge-anonymization';
-
-// Generate and store key: openssl rand -base64 32
-// Set environment variable: export PII_ENCRYPTION_KEY=<base64-key>
-
-const keyProvider = new EnvKeyProvider('PII_ENCRYPTION_KEY');
-const anonymizer = createAnonymizer({
-  ner: { mode: 'quantized' },
-  keyProvider
-});
-```
 
 ## API Reference
 
@@ -152,21 +176,31 @@ import { createAnonymizer, InMemoryKeyProvider } from '@elanlanguages/bridge-ano
 const anonymizer = createAnonymizer({
   // NER configuration
   ner: {
-    mode: 'quantized',     // 'standard' | 'quantized' | 'disabled' | 'custom'
-    autoDownload: true,    // Auto-download model if not present
-    onStatus: (s) => {},   // Status messages callback
-    onDownloadProgress: (p) => {},  // Download progress callback
+    mode: 'quantized',              // 'standard' | 'quantized' | 'disabled' | 'custom'
+    autoDownload: true,             // Auto-download model if not present
+    onStatus: (status) => {},       // Status messages callback
+    onDownloadProgress: (progress) => {
+      console.log(`${progress.file}: ${progress.percent}%`);
+    },
     
     // For 'custom' mode only:
     modelPath: './my-model.onnx',
     vocabPath: './vocab.txt',
   },
   
+  // Semantic enrichment (adds gender/scope attributes)
+  semantic: {
+    enabled: true,                  // Enable MT-friendly attributes
+    autoDownload: true,             // Auto-download semantic data (~12 MB)
+    onStatus: (status) => {},
+    onDownloadProgress: (progress) => {},
+  },
+  
   // Encryption key provider
   keyProvider: new InMemoryKeyProvider(),
   
-  // Custom policy
-  defaultPolicy: { /* ... */ },
+  // Custom policy (optional)
+  defaultPolicy: { /* see Policy section */ },
 });
 
 await anonymizer.initialize();
@@ -185,7 +219,7 @@ await anonymizer.initialize();
 
 #### `createAnonymizer(config?)`
 
-Creates an anonymizer instance:
+Creates a reusable anonymizer instance:
 
 ```typescript
 const anonymizer = createAnonymizer({
@@ -202,6 +236,8 @@ await anonymizer.dispose();
 One-off anonymization (regex-only by default):
 
 ```typescript
+import { anonymize } from '@elanlanguages/bridge-anonymization';
+
 const result = await anonymize('Contact test@example.com');
 ```
 
@@ -210,6 +246,8 @@ const result = await anonymize('Contact test@example.com');
 One-off anonymization with NER:
 
 ```typescript
+import { anonymizeWithNER } from '@elanlanguages/bridge-anonymization';
+
 const result = await anonymizeWithNER(
   'Hello John Smith',
   { mode: 'quantized' }
@@ -221,7 +259,32 @@ const result = await anonymizeWithNER(
 Fast regex-only anonymization:
 
 ```typescript
+import { anonymizeRegexOnly } from '@elanlanguages/bridge-anonymization';
+
 const result = await anonymizeRegexOnly('Card: 4111111111111111');
+```
+
+### Rehydration Functions
+
+#### `decryptPIIMap(encryptedMap, key)`
+
+Decrypts the PII map for rehydration:
+
+```typescript
+import { decryptPIIMap } from '@elanlanguages/bridge-anonymization';
+
+const piiMap = await decryptPIIMap(result.piiMap, encryptionKey);
+// Returns Map<string, string> where key is "PERSON:1" and value is "John Smith"
+```
+
+#### `rehydrate(text, piiMap)`
+
+Replaces placeholders with original values:
+
+```typescript
+import { rehydrate } from '@elanlanguages/bridge-anonymization';
+
+const original = rehydrate(translatedText, piiMap);
 ```
 
 ### Result Structure
@@ -261,22 +324,22 @@ interface AnonymizationResult {
 
 ## Supported PII Types
 
-| Type | Description | Detection Method |
-|------|-------------|------------------|
-| `EMAIL` | Email addresses | Regex |
-| `PHONE` | Phone numbers (international) | Regex |
-| `IBAN` | International Bank Account Numbers | Regex + Checksum |
-| `BIC_SWIFT` | Bank Identifier Codes | Regex |
-| `CREDIT_CARD` | Credit card numbers | Regex + Luhn |
-| `IP_ADDRESS` | IPv4 and IPv6 addresses | Regex |
-| `URL` | Web URLs | Regex |
-| `CASE_ID` | Case/ticket numbers | Regex (configurable) |
-| `CUSTOMER_ID` | Customer identifiers | Regex (configurable) |
-| `PERSON` | Person names | NER |
-| `ORG` | Organization names | NER |
-| `LOCATION` | Location/place names | NER |
-| `ADDRESS` | Physical addresses | NER |
-| `DATE_OF_BIRTH` | Dates of birth | NER |
+| Type | Description | Detection | Semantic Attributes |
+|------|-------------|-----------|---------------------|
+| `EMAIL` | Email addresses | Regex | - |
+| `PHONE` | Phone numbers (international) | Regex | - |
+| `IBAN` | International Bank Account Numbers | Regex + Checksum | - |
+| `BIC_SWIFT` | Bank Identifier Codes | Regex | - |
+| `CREDIT_CARD` | Credit card numbers | Regex + Luhn | - |
+| `IP_ADDRESS` | IPv4 and IPv6 addresses | Regex | - |
+| `URL` | Web URLs | Regex | - |
+| `CASE_ID` | Case/ticket numbers | Regex (configurable) | - |
+| `CUSTOMER_ID` | Customer identifiers | Regex (configurable) | - |
+| `PERSON` | Person names | NER | `gender` (male/female/neutral) |
+| `ORG` | Organization names | NER | - |
+| `LOCATION` | Location/place names | NER | `scope` (city/country/region) |
+| `ADDRESS` | Physical addresses | NER | - |
+| `DATE_OF_BIRTH` | Dates of birth | NER | - |
 
 ## Configuration
 
@@ -299,6 +362,9 @@ const anonymizer = createAnonymizer({
     
     // Terms to never treat as PII
     allowlistTerms: new Set(['Customer Service', 'Help Desk']),
+    
+    // Enable semantic enrichment (gender/scope)
+    enableSemanticMasking: true,
     
     // Enable leak scanning on output
     enableLeakScan: true,
@@ -325,88 +391,175 @@ const anonymizer = createAnonymizer();
 anonymizer.getRegistry().register(customRecognizer);
 ```
 
-## Model Management
+## Data & Model Storage
 
-Models are hosted on [Hugging Face Hub](https://huggingface.co/tjruesch/xlm-roberta-base-ner-hrl-onnx) and automatically downloaded on first use.
+Models and semantic data are cached locally for offline use.
 
-**Cache locations:**
-- **macOS**: `~/Library/Caches/bridge-anonymization/models/`
-- **Linux**: `~/.cache/bridge-anonymization/models/`
-- **Windows**: `%LOCALAPPDATA%/bridge-anonymization/models/`
+### Node.js Cache Locations
 
-### Manual Model Management
+| Data | macOS | Linux | Windows |
+|------|-------|-------|---------|
+| NER Models | `~/Library/Caches/bridge-anonymization/models/` | `~/.cache/bridge-anonymization/models/` | `%LOCALAPPDATA%/bridge-anonymization/models/` |
+| Semantic Data | `~/Library/Caches/bridge-anonymization/semantic-data/` | `~/.cache/bridge-anonymization/semantic-data/` | `%LOCALAPPDATA%/bridge-anonymization/semantic-data/` |
+
+### Browser Cache
+
+In browsers, data is stored using:
+- **IndexedDB**: For semantic data and smaller files
+- **Origin Private File System (OPFS)**: For large model files (~280 MB)
+
+Data persists across page reloads and browser sessions.
+
+### Manual Data Management
 
 ```typescript
 import { 
+  // Model management
   isModelDownloaded, 
   downloadModel, 
   clearModelCache,
   listDownloadedModels,
-  getModelCacheDir 
+  
+  // Semantic data management
+  isSemanticDataDownloaded,
+  downloadSemanticData,
+  clearSemanticDataCache,
 } from '@elanlanguages/bridge-anonymization';
 
 // Check if model is downloaded
 const hasModel = await isModelDownloaded('quantized');
 
-// Manually download
+// Manually download model with progress
 await downloadModel('quantized', (progress) => {
   console.log(`${progress.file}: ${progress.percent}%`);
 });
 
+// Check semantic data
+const hasSemanticData = await isSemanticDataDownloaded();
+
 // List downloaded models
 const models = await listDownloadedModels();
 
-// Clear cache
+// Clear caches
 await clearModelCache('quantized');  // or clearModelCache() for all
+await clearSemanticDataCache();
 ```
 
 ## Encryption & Security
 
-The PII map is encrypted using AES-256-GCM:
+The PII map is encrypted using **AES-256-GCM** via the Web Crypto API (works in both Node.js and browsers).
+
+### Key Providers
 
 ```typescript
-import { createAnonymizer, KeyProvider, generateKey } from '@elanlanguages/bridge-anonymization';
+import { 
+  InMemoryKeyProvider,    // For development/testing
+  ConfigKeyProvider,      // For production with pre-configured key
+  KeyProvider,            // Interface for custom implementations
+  generateKey,
+} from '@elanlanguages/bridge-anonymization';
 
+// Development: In-memory key (generates random key, lost on page refresh)
+const devKeyProvider = new InMemoryKeyProvider();
+
+// Production: Pre-configured key
+// Generate key: openssl rand -base64 32
+const keyBase64 = process.env.PII_ENCRYPTION_KEY;  // or read from config
+const prodKeyProvider = new ConfigKeyProvider(keyBase64);
+
+// Custom: Implement KeyProvider interface
 class SecureKeyProvider implements KeyProvider {
-  async getKey(): Promise<Buffer> {
-    // Retrieve from OS keychain, HSM, or secure storage
+  async getKey(): Promise<Uint8Array> {
+    // Retrieve from secure storage, HSM, keychain, etc.
     return await getKeyFromSecureStorage();
   }
 }
-
-const anonymizer = createAnonymizer({
-  keyProvider: new SecureKeyProvider(),
-  ner: { mode: 'quantized' },
-});
 ```
 
 ### Security Best Practices
 
 - **Never log the raw PII map** - Always use encrypted storage
+- **Persist the encryption key securely** - Use platform keystores (iOS Keychain, Android Keystore, etc.)
 - **Rotate keys** - Implement key rotation for long-running applications
-- **Use platform keystores** - iOS Keychain, Android Keystore, or OS credential managers
 - **Enable leak scanning** - Catch any missed PII in output
+
+## Browser Usage
+
+The library works seamlessly in browsers without any special configuration.
+
+### Basic Browser Example
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PII Anonymization</title>
+</head>
+<body>
+  <script type="module">
+    import { 
+      createAnonymizer, 
+      InMemoryKeyProvider,
+      decryptPIIMap,
+      rehydrate
+    } from './node_modules/@elanlanguages/bridge-anonymization/dist/index.js';
+    
+    async function demo() {
+      // Create anonymizer
+      const keyProvider = new InMemoryKeyProvider();
+      const anonymizer = createAnonymizer({
+        ner: { 
+          mode: 'quantized',
+          onStatus: (s) => console.log('NER:', s),
+          onDownloadProgress: (p) => console.log(`Download: ${p.percent}%`)
+        },
+        semantic: { enabled: true },
+        keyProvider
+      });
+      
+      // Initialize (downloads models on first use)
+      await anonymizer.initialize();
+      
+      // Anonymize
+      const result = await anonymizer.anonymize(
+        'Contact Maria Schmidt at maria@example.com in Berlin.'
+      );
+      
+      console.log('Anonymized:', result.anonymizedText);
+      // "Contact <PII type="PERSON" gender="female" id="1"/> at <PII type="EMAIL" id="2"/> in <PII type="LOCATION" scope="city" id="3"/>."
+      
+      // Rehydrate
+      const key = await keyProvider.getKey();
+      const piiMap = await decryptPIIMap(result.piiMap, key);
+      const original = rehydrate(result.anonymizedText, piiMap);
+      
+      console.log('Rehydrated:', original);
+      
+      await anonymizer.dispose();
+    }
+    
+    demo().catch(console.error);
+  </script>
+</body>
+</html>
+```
+
+### Browser Notes
+
+- **First-use downloads**: NER model (~280 MB) and semantic data (~12 MB) are downloaded on first use
+- **ONNX runtime**: Automatically loaded from CDN if not bundled
+- **Offline support**: After initial download, everything works offline
+- **Storage**: Uses IndexedDB and OPFS - data persists across sessions
 
 ## Bun Support
 
-This library works with [Bun](https://bun.sh). Since `onnxruntime-node` is a native Node.js addon, Bun users need `onnxruntime-web`:
+This library works with [Bun](https://bun.sh). Since `onnxruntime-node` is a native Node.js addon, Bun uses `onnxruntime-web`:
 
 ```bash
 bun add @elanlanguages/bridge-anonymization onnxruntime-web
 ```
 
-Usage is identical - the library auto-detects the runtime:
-
-```typescript
-import { createAnonymizer } from '@elanlanguages/bridge-anonymization';
-
-const anonymizer = createAnonymizer({
-  ner: { mode: 'quantized' }
-});
-
-await anonymizer.initialize();
-const result = await anonymizer.anonymize('Hello John Smith');
-```
+Usage is identical - the library auto-detects the runtime.
 
 ## Performance
 
@@ -414,12 +567,22 @@ const result = await anonymizer.anonymize('Hello John Smith');
 |-----------|-----------------|-------|
 | Regex pass | ~5 ms | All regex recognizers |
 | NER inference | ~100-150 ms | Quantized model |
+| Semantic enrichment | ~1-2 ms | After data loaded |
 | Total pipeline | ~150-200 ms | Full anonymization |
 
 | Model | Size | First-Use Download |
 |-------|------|-------------------|
 | Quantized | ~280 MB | ~30s on fast connection |
 | Standard | ~1.1 GB | ~2min on fast connection |
+| Semantic Data | ~12 MB | ~5s on fast connection |
+
+## Requirements
+
+| Environment | Version | Notes |
+|-------------|---------|-------|
+| Node.js | >= 18.0.0 | Uses native `onnxruntime-node` |
+| Bun | >= 1.0.0 | Requires `onnxruntime-web` |
+| Browsers | Chrome 86+, Firefox 89+, Safari 15.4+, Edge 86+ | Uses OPFS for model storage |
 
 ## Development
 
@@ -432,22 +595,20 @@ npm test
 
 # Build
 npm run build
+
+# Lint
+npm run lint
 ```
 
 ### Building Custom Models
 
-For development or custom models, you can use the setup script:
+For development or custom models:
 
 ```bash
 # Requires Python 3.8+
 npm run setup:ner              # Standard model
 npm run setup:ner:quantized    # Quantized model
 ```
-
-## Requirements
-
-- Node.js >= 18.0.0 (ONNX runtime included automatically)
-- Bun >= 1.0.0 (requires `onnxruntime-web`)
 
 ## License
 
